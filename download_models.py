@@ -33,6 +33,7 @@ def download_with_requests(file_id, destination):
     
     save_response_content(response, destination)
 
+
 def download_file_from_google_drive(file_id, destination):
     """Download file with gdown first, fallback to requests if it fails"""
     
@@ -59,20 +60,20 @@ def download_file_from_google_drive(file_id, destination):
             print(f"✗ Both methods failed for {destination}: {e2}")
             raise
 
+
 def download_models():
     """Download models from Google Drive on startup"""
     
-    # Create directories
+    # Create only the models directory (no validator_models needed)
     os.makedirs('models', exist_ok=True)
-    os.makedirs('validator_models', exist_ok=True)
     
     print("Checking for model files...")
     
-    # Model files with Google Drive File IDs
+    # Only download the cry classifier models (validator removed)
     models = {
-        'validator_models/neural_classifier.pth': '1uoRlHZl1xy_DRnIAPbWv7Aa0Cm_i4ycI',
         'models/best_model.pth': '1ukJZvHxYqWLiIEAJ4RN6f6XqHE0c81di',
         'models/label_encoder.json': '18-PHK9vI4QTmi2vUfFd6Zlxh0a3jWTE0'
+        # REMOVED: 'validator_models/neural_classifier.pth'
     }
     
     for path, file_id in models.items():
@@ -88,6 +89,7 @@ def download_models():
             print(f"✓ {path} already exists")
     
     print("\n✓ Model files ready!")
+
 
 if __name__ == '__main__':
     download_models()
