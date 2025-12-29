@@ -1,5 +1,5 @@
 """
-Part 4: Flask API with Baby Voice Validation
+Flask API for Baby Cry Classification (Validation Disabled)
 """
 
 from flask import Flask, request, jsonify
@@ -9,9 +9,7 @@ import os
 import json
 import numpy as np
 import librosa
-import soundfile as sf
 from datetime import datetime
-import io
 import base64
 from pydub import AudioSegment
 import torch
@@ -27,182 +25,7 @@ download_models()
 print("✓ Model files ready!")
 
 # ============================================================================
-# BABY VOICE VALIDATOR CLASSES
-# ============================================================================
-
-class FrequencyAnalyzer:
-    """Layer 1: Frequency-based validation"""
-    
-    def __init__(self):
-        self.baby_f0_min = 300
-        self.baby_f0_max = 600
-        self.adult_male_max = 180
-        self.adult_female_max = 255
-    
-    def extract_pitch(self, audio, sr=16000):
-        """Extract fundamental frequency"""
-        try:
-            f0, voiced_flag, voiced_probs = librosa.pyin(
-                audio,
-                fmin=librosa.note_to_hz('C2'),
-                fmax=librosa.note_to_hz('C7'),
-                sr=sr
-            )
-            valid_f0 = f0[~np.isnan(f0)]
-            if len(valid_f0) == 0:
-                return None
-            return np.median(valid_f0)
-        except:
-            return None
-    
-    def analyze(self, audio, sr=16000):
-        """Analyze frequency characteristics"""
-        median_pitch = self.extract_pitch(audio, sr)
-        
-        if median_pitch is None:
-            return {
-                'is_baby_likely': False,
-                'confidence': 0.0,
-                'median_pitch': None,
-                'reasoning': 'No clear pitch detected'
-            }
-        
-        if self.baby_f0_min <= median_pitch <= self.baby_f0_max:
-            return {
-                'is_baby_likely': True,
-                'confidence': 0.8,
-                'median_pitch': median_pitch,
-                'reasoning': f'Pitch {median_pitch:.1f}Hz in baby range'
-            }
-        elif median_pitch <= self.adult_female_max:
-            return {
-                'is_baby_likely': False,
-                'confidence': 0.7,
-                'median_pitch': median_pitch,
-                'reasoning': f'Pitch {median_pitch:.1f}Hz in adult range'
-            }
-        else:
-            return {
-                'is_baby_likely': False,
-                'confidence': 0.6,
-                'median_pitch': median_pitch,
-                'reasoning': f'Pitch {median_pitch:.1f}Hz unusual (not baby)'
-            }
-
-
-class BabyVoiceCNN(nn.Module):
-    """Layer 2: Neural classifier"""
-    
-    def __init__(self):
-        super(BabyVoiceCNN, self).__init__()
-        
-        self.conv_layers = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(0.2),
-            
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(0.2),
-            
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.MaxPool2d(2),
-            nn.Dropout(0.3),
-        )
-        
-        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
-        
-        self.classifier = nn.Sequential(
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(0.5),
-            nn.Linear(64, 2)
-        )
-    
-    def forward(self, x):
-        x = self.conv_layers(x)
-        x = self.global_pool(x)
-        x = x.view(x.size(0), -1)
-        x = self.classifier(x)
-        return x
-
-
-class HybridBabyVoiceValidator:
-    """Hybrid validator combining both layers"""
-    
-    def __init__(self, neural_model_path, device='cuda'):
-        self.device = device if torch.cuda.is_available() else 'cpu'
-        
-        # Layer 1
-        self.freq_analyzer = FrequencyAnalyzer()
-        
-        # Layer 2
-        self.neural_model = BabyVoiceCNN()
-        checkpoint = torch.load(neural_model_path, map_location=self.device, weights_only=True)
-        self.neural_model.load_state_dict(checkpoint['model_state_dict'])
-        self.neural_model.to(self.device)
-        self.neural_model.eval()
-    
-    def validate_audio_array(self, audio, sr=16000, freq_weight=0.3, neural_weight=0.7, threshold=0.65):
-        """Validate if audio is baby voice"""
-        # Normalize audio
-        if np.max(np.abs(audio)) > 0:
-            audio = audio / np.max(np.abs(audio))
-        
-        # Layer 1: Frequency Analysis
-        freq_result = self.freq_analyzer.analyze(audio, sr)
-        freq_score = freq_result['confidence'] if freq_result['is_baby_likely'] else (1 - freq_result['confidence'])
-        
-        # Layer 2: Neural Classification
-        try:
-            mel_spec = librosa.feature.melspectrogram(y=audio, sr=sr, n_mels=128, fmax=8000)
-            mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
-            mel_spec_db = (mel_spec_db - mel_spec_db.mean()) / (mel_spec_db.std() + 1e-6)
-            
-            target_width = 313
-            if mel_spec_db.shape[1] < target_width:
-                mel_spec_db = np.pad(mel_spec_db, ((0, 0), (0, target_width - mel_spec_db.shape[1])))
-            else:
-                mel_spec_db = mel_spec_db[:, :target_width]
-            
-            features = torch.FloatTensor(mel_spec_db).unsqueeze(0).unsqueeze(0).to(self.device)
-            
-            with torch.no_grad():
-                outputs = self.neural_model(features)
-                probs = torch.softmax(outputs, dim=1)
-                neural_confidence = probs[0][1].item()
-        except Exception as e:
-            print(f"Neural classification error: {e}")
-            neural_confidence = 0.5
-        
-        # Combine scores
-        combined_confidence = (freq_weight * freq_score) + (neural_weight * neural_confidence)
-        is_baby = combined_confidence >= threshold
-        
-        return {
-            'is_baby_voice': is_baby,
-            'combined_confidence': float(combined_confidence),
-            'frequency_analysis': {
-                'score': float(freq_score),
-                'median_pitch': float(freq_result['median_pitch']) if freq_result['median_pitch'] else None,
-                'reasoning': freq_result['reasoning']
-            },
-            'neural_classification': {
-                'baby_probability': float(neural_confidence),
-                'non_baby_probability': float(1 - neural_confidence)
-            },
-            'threshold': threshold
-        }
-
-
-# ============================================================================
-# CRY CLASSIFIER
+# CRY CLASSIFIER (Validation removed)
 # ============================================================================
 
 class HuBERTClassifier(nn.Module):
@@ -335,22 +158,18 @@ app.config['ALLOWED_EXTENSIONS'] = {'wav', 'mp3', 'm4a', 'flac', 'ogg', 'webm'}
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Model paths
-VALIDATOR_MODEL_PATH = 'validator_models/neural_classifier.pth'
 CRY_CLASSIFIER_MODEL_PATH = 'models/best_model.pth'
 LABEL_ENCODER_PATH = 'models/label_encoder.json'
 
-# Global models
-validator = None
+# Global model
 cry_predictor = None
-VALIDATION_ENABLED = False
 
 
 def init_models():
-    """Initialize both models"""
-    global validator, cry_predictor, VALIDATION_ENABLED
+    """Initialize cry classifier"""
+    global cry_predictor
 
     try:
-        # Initialize Cry Classifier (REQUIRED)
         print("\nInitializing Cry Classifier...")
         cry_predictor = InfantCryPredictor(
             model_path=CRY_CLASSIFIER_MODEL_PATH,
@@ -358,21 +177,6 @@ def init_models():
             device='cuda' if torch.cuda.is_available() else 'cpu'
         )
         print("✓ Cry classifier loaded successfully!")
-        
-        # Try to initialize Validator (OPTIONAL)
-        try:
-            print("\nInitializing Baby Voice Validator...")
-            validator = HybridBabyVoiceValidator(
-                neural_model_path=VALIDATOR_MODEL_PATH,
-                device='cuda' if torch.cuda.is_available() else 'cpu'
-            )
-            VALIDATION_ENABLED = True
-            print("✓ Validator loaded successfully!")
-        except Exception as val_error:
-            print(f"⚠ Warning: Validator could not be loaded: {val_error}")
-            print("⚠ Continuing without validation...")
-            VALIDATION_ENABLED = False
-        
         return True
         
     except Exception as e:
@@ -418,7 +222,8 @@ def home():
     return jsonify({
         "message": "DontCryAI Backend API",
         "status": "running",
-        "version": "1.0",
+        "version": "2.0",
+        "validation": "disabled",
         "endpoints": {
             "health": "/api/health",
             "predict_upload": "/api/predict/upload",
@@ -433,8 +238,7 @@ def health_check():
     """Health check"""
     return jsonify({
         'status': 'healthy',
-        'validation_enabled': VALIDATION_ENABLED,
-        'validator_loaded': validator is not None,
+        'validation_enabled': False,
         'cry_predictor_loaded': cry_predictor is not None,
         'device': cry_predictor.device if cry_predictor else None,
         'classes': cry_predictor.classes if cry_predictor else None,
@@ -444,9 +248,8 @@ def health_check():
 
 @app.route('/api/predict/upload', methods=['POST'])
 def predict_upload():
-    """Predict with optional validation"""
+    """Predict from uploaded file"""
     try:
-        # Check if cry_predictor is loaded
         if cry_predictor is None:
             return jsonify({
                 'success': False,
@@ -455,15 +258,20 @@ def predict_upload():
             }), 503
         
         if 'file' not in request.files:
-            return jsonify({'error': 'No file provided'}), 400
+            return jsonify({
+                'success': False,
+                'error': 'No file provided'
+            }), 400
         
         file = request.files['file']
         
         if file.filename == '' or not allowed_file(file.filename):
-            return jsonify({'error': 'Invalid file'}), 400
+            return jsonify({
+                'success': False,
+                'error': 'Invalid file'
+            }), 400
         
         confidence_threshold = float(request.form.get('confidence_threshold', 0.6))
-        validation_threshold = float(request.form.get('validation_threshold', 0.65))
         
         # Save file
         filename = secure_filename(file.filename)
@@ -477,42 +285,17 @@ def predict_upload():
             wav_path = temp_path.rsplit('.', 1)[0] + '.wav'
             if not convert_to_wav(temp_path, wav_path):
                 os.remove(temp_path)
-                return jsonify({'error': 'Audio conversion failed'}), 500
+                return jsonify({
+                    'success': False,
+                    'error': 'Audio conversion failed'
+                }), 500
             os.remove(temp_path)
             temp_path = wav_path
         
         # Load audio
         audio, sr = load_audio_file(temp_path)
         
-        # STEP 1: VALIDATE (only if enabled)
-        validation_result = None
-        if VALIDATION_ENABLED and validator is not None:
-            try:
-                validation_result = validator.validate_audio_array(audio, sr, threshold=validation_threshold)
-                
-                # If NOT baby voice, return early
-                if not validation_result['is_baby_voice']:
-                    os.remove(temp_path)
-                    return jsonify({
-                        'success': False,
-                        'error': 'Audio validation failed',
-                        'message': 'This does not appear to be a baby cry. Please upload baby cry audio only.',
-                        'validation': validation_result,
-                        'timestamp': datetime.now().isoformat()
-                    }), 400
-            except Exception as val_error:
-                print(f"⚠ Validation error: {val_error}")
-                validation_result = {
-                    'status': 'error',
-                    'message': 'Validation temporarily unavailable'
-                }
-        else:
-            validation_result = {
-                'status': 'disabled',
-                'message': 'Validation is currently unavailable'
-            }
-        
-        # STEP 2: CLASSIFY
+        # CLASSIFY (No validation)
         prediction_result = cry_predictor.predict_array(audio, sr, confidence_threshold)
         
         # Cleanup
@@ -521,7 +304,6 @@ def predict_upload():
         return jsonify({
             'success': True,
             'data': {
-                'validation': validation_result,
                 'prediction': prediction_result,
                 'filename': filename,
                 'timestamp': datetime.now().isoformat()
@@ -530,14 +312,16 @@ def predict_upload():
     
     except Exception as e:
         print(f"Error in predict_upload: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 
 @app.route('/api/predict/record', methods=['POST'])
 def predict_record():
-    """Predict from recording with optional validation"""
+    """Predict from recording"""
     try:
-        # Check if cry_predictor is loaded
         if cry_predictor is None:
             return jsonify({
                 'success': False,
@@ -548,69 +332,64 @@ def predict_record():
         data = request.get_json()
         
         if not data:
-            return jsonify({'error': 'No JSON data provided'}), 400
+            return jsonify({
+                'success': False,
+                'error': 'No JSON data provided'
+            }), 400
         
         audio_format = data.get('format', 'base64')
         sample_rate = int(data.get('sample_rate', 16000))
         confidence_threshold = float(data.get('confidence_threshold', 0.6))
-        validation_threshold = float(data.get('validation_threshold', 0.65))
         
         # Parse audio
         if audio_format == 'base64':
             audio_base64 = data.get('audio_data')
             if not audio_base64:
-                return jsonify({'error': 'No audio_data provided'}), 400
+                return jsonify({
+                    'success': False,
+                    'error': 'No audio_data provided'
+                }), 400
             
-            audio_bytes = base64.b64decode(audio_base64)
-            temp_path = os.path.join(app.config['UPLOAD_FOLDER'], f'temp_record_{datetime.now().strftime("%Y%m%d_%H%M%S")}.wav')
-            with open(temp_path, 'wb') as f:
-                f.write(audio_bytes)
-            
-            audio, sr = load_audio_file(temp_path)
-            os.remove(temp_path)
+            try:
+                audio_bytes = base64.b64decode(audio_base64)
+                temp_path = os.path.join(
+                    app.config['UPLOAD_FOLDER'], 
+                    f'temp_record_{datetime.now().strftime("%Y%m%d_%H%M%S")}.wav'
+                )
+                with open(temp_path, 'wb') as f:
+                    f.write(audio_bytes)
+                
+                audio, sr = load_audio_file(temp_path)
+                os.remove(temp_path)
+                
+            except Exception as decode_error:
+                print(f"Audio decode error: {decode_error}")
+                return jsonify({
+                    'success': False,
+                    'error': 'Failed to decode audio data'
+                }), 400
         
         elif audio_format == 'array':
             audio_array = data.get('audio_data')
             if not audio_array:
-                return jsonify({'error': 'No audio_data provided'}), 400
+                return jsonify({
+                    'success': False,
+                    'error': 'No audio_data provided'
+                }), 400
             audio = np.array(audio_array, dtype=np.float32)
             sr = sample_rate
         else:
-            return jsonify({'error': 'Invalid format'}), 400
+            return jsonify({
+                'success': False,
+                'error': 'Invalid format'
+            }), 400
         
-        # STEP 1: VALIDATE (only if enabled)
-        validation_result = None
-        if VALIDATION_ENABLED and validator is not None:
-            try:
-                validation_result = validator.validate_audio_array(audio, sr, threshold=validation_threshold)
-                
-                if not validation_result['is_baby_voice']:
-                    return jsonify({
-                        'success': False,
-                        'error': 'Audio validation failed',
-                        'message': 'This does not appear to be a baby cry.',
-                        'validation': validation_result,
-                        'timestamp': datetime.now().isoformat()
-                    }), 400
-            except Exception as val_error:
-                print(f"⚠ Validation error: {val_error}")
-                validation_result = {
-                    'status': 'error',
-                    'message': 'Validation temporarily unavailable'
-                }
-        else:
-            validation_result = {
-                'status': 'disabled',
-                'message': 'Validation is currently unavailable'
-            }
-        
-        # STEP 2: CLASSIFY
+        # CLASSIFY (No validation)
         prediction_result = cry_predictor.predict_array(audio, sr, confidence_threshold)
         
         return jsonify({
             'success': True,
             'data': {
-                'validation': validation_result,
                 'prediction': prediction_result,
                 'timestamp': datetime.now().isoformat()
             }
@@ -618,7 +397,12 @@ def predict_record():
     
     except Exception as e:
         print(f"Error in predict_record: {e}")
-        return jsonify({'error': str(e)}), 500
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 
 @app.route('/api/classes', methods=['GET'])
@@ -626,10 +410,14 @@ def get_classes():
     """Get cry types"""
     if cry_predictor:
         return jsonify({
+            'success': True,
             'classes': cry_predictor.classes,
             'num_classes': cry_predictor.num_classes
         })
-    return jsonify({'error': 'Predictor not initialized'}), 500
+    return jsonify({
+        'success': False,
+        'error': 'Predictor not initialized'
+    }), 500
 
 
 # ============================================================================
@@ -638,25 +426,34 @@ def get_classes():
 
 @app.errorhandler(413)
 def request_entity_too_large(error):
-    return jsonify({'error': 'File too large. Maximum size: 10MB'}), 413
+    return jsonify({
+        'success': False,
+        'error': 'File too large. Maximum size: 10MB'
+    }), 413
 
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({'error': 'Endpoint not found'}), 404
+    return jsonify({
+        'success': False,
+        'error': 'Endpoint not found'
+    }), 404
 
 
 @app.errorhandler(500)
 def internal_error(error):
-    return jsonify({'error': 'Internal server error'}), 500
+    return jsonify({
+        'success': False,
+        'error': 'Internal server error'
+    }), 500
 
 
 # ============================================================================
-# INITIALIZE MODELS AT MODULE LEVEL (FOR GUNICORN)
+# INITIALIZE MODELS
 # ============================================================================
 
 print("=" * 70)
-print("INITIALIZING BACKEND")
+print("INITIALIZING BACKEND (VALIDATION DISABLED)")
 print("=" * 70)
 
 if not init_models():
@@ -667,11 +464,7 @@ else:
         print(f"✓ Device: {cry_predictor.device}")
         print(f"✓ Cry classes: {cry_predictor.classes}")
     
-    if VALIDATION_ENABLED:
-        print("✓ Validation: ENABLED")
-    else:
-        print("⚠ Validation: DISABLED")
-    
+    print("✓ Validation: DISABLED")
     print("=" * 70)
 
 # For local development
