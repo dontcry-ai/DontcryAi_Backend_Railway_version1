@@ -1,8 +1,0 @@
-[phases.setup]
-nixPkgs = ["python310Full", "python310Packages.pip"]
-
-[phases.install]
-cmds = ["python3 -m pip install -r requirements.txt"]
-
-[start]
-cmd = "gunicorn apps:app --bind 0.0.0.0:$PORT --workers 1 --timeout 300 --max-requests 1000"
