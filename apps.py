@@ -1,5 +1,6 @@
 """
 Flask API for Baby Cry Classification (Validation Disabled)
+With Auto-Shutdown Feature for Cost Optimization
 """
 
 from flask import Flask, request, jsonify
@@ -23,6 +24,49 @@ from download_models import download_models
 print("Checking for model files...")
 download_models()
 print("✓ Model files ready!")
+
+# ============================================================================
+# AUTO-SHUTDOWN FOR IDLE TIMEOUT (Cost Saving)
+# ============================================================================
+
+from threading import Thread
+import time
+import signal
+
+# Configuration: Shutdown after 10 minutes of inactivity
+IDLE_SHUTDOWN_MINUTES = float(os.getenv("IDLE_SHUTDOWN_MINUTES", "10"))
+last_activity = datetime.now()
+
+def start_idle_monitor():
+    """Monitor for inactivity and shutdown to save costs"""
+    if IDLE_SHUTDOWN_MINUTES <= 0:
+        print("✓ Auto-shutdown disabled (IDLE_SHUTDOWN_MINUTES=0)")
+        return
+    
+    def check_idle():
+        global last_activity
+        check_interval = 60  # Check every 1 minute
+        
+        while True:
+            time.sleep(check_interval)
+            idle_seconds = (datetime.now() - last_activity).total_seconds()
+            idle_minutes = idle_seconds / 60
+            
+            if idle_seconds > IDLE_SHUTDOWN_MINUTES * 60:
+                print(f"\n{'='*70}")
+                print(f"⏰ IDLE SHUTDOWN: No activity for {idle_minutes:.1f} minutes")
+                print(f"💰 Shutting down to save costs...")
+                print(f"🔄 Railway will auto-restart on next request")
+                print(f"{'='*70}\n")
+                os.kill(os.getpid(), signal.SIGTERM)
+                break
+            else:
+                remaining = (IDLE_SHUTDOWN_MINUTES - idle_minutes)
+                if remaining <= 5 or int(idle_minutes) % 5 == 0:  # Log at 5min intervals
+                    print(f"⏱️  Idle: {idle_minutes:.1f}min | Shutdown in: {remaining:.1f}min")
+    
+    Thread(target=check_idle, daemon=True).start()
+    print(f"✓ Auto-shutdown enabled: {IDLE_SHUTDOWN_MINUTES} minutes idle timeout")
 
 # ============================================================================
 # CRY CLASSIFIER (Validation removed)
@@ -165,6 +209,14 @@ LABEL_ENCODER_PATH = 'models/label_encoder.json'
 cry_predictor = None
 
 
+# Middleware to track activity on every request
+@app.before_request
+def track_activity():
+    """Update last activity timestamp on each request"""
+    global last_activity
+    last_activity = datetime.now()
+
+
 def init_models():
     """Initialize cry classifier"""
     global cry_predictor
@@ -224,6 +276,7 @@ def home():
         "status": "running",
         "version": "2.0",
         "validation": "disabled",
+        "auto_shutdown": f"{IDLE_SHUTDOWN_MINUTES} minutes idle timeout" if IDLE_SHUTDOWN_MINUTES > 0 else "disabled",
         "endpoints": {
             "health": "/api/health",
             "predict_upload": "/api/predict/upload",
@@ -236,12 +289,15 @@ def home():
 @app.route('/api/health', methods=['GET'])
 def health_check():
     """Health check"""
+    idle_time = (datetime.now() - last_activity).total_seconds() / 60
     return jsonify({
         'status': 'healthy',
         'validation_enabled': False,
         'cry_predictor_loaded': cry_predictor is not None,
         'device': cry_predictor.device if cry_predictor else None,
         'classes': cry_predictor.classes if cry_predictor else None,
+        'idle_minutes': round(idle_time, 2),
+        'shutdown_in_minutes': round(IDLE_SHUTDOWN_MINUTES - idle_time, 2) if IDLE_SHUTDOWN_MINUTES > 0 else None,
         'timestamp': datetime.now().isoformat()
     })
 
@@ -465,6 +521,10 @@ else:
         print(f"✓ Cry classes: {cry_predictor.classes}")
     
     print("✓ Validation: DISABLED")
+    
+    # START IDLE MONITOR
+    start_idle_monitor()
+    
     print("=" * 70)
 
 # For local development
